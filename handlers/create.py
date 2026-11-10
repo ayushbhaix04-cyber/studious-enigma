@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from aiogram import Bot, F, Router
@@ -25,6 +26,8 @@ from services.giveaways import create_giveaway
 from utils.validators import VALIDATORS
 
 router = Router(name="create")
+logger = logging.getLogger(__name__)
+
 
 STEPS = [
     "title",
@@ -76,9 +79,8 @@ class Create(StatesGroup):
 
 
 def valid_step(data: dict) -> bool:
-    """Check whether the stored FSM step points to a real step."""
     step = data.get("step")
-    return isinstance(step, int) and 0 <= step < len(STEPS)
+    return type(step) is int and 0 <= step < len(STEPS)
 
 
 def nav_kb(idx: int) -> Kb:
@@ -86,7 +88,7 @@ def nav_kb(idx: int) -> Kb:
     rows: list[list[Btn]] = []
 
     if key == "poster":
-        rows += themes_kb("cr:theme:")
+        rows.extend(themes_kb("cr:theme:"))
 
     if key == "visibility":
         rows.append([
@@ -127,7 +129,8 @@ async def show_step(target: Message, state: FSMContext) -> None:
     idx = data["step"]
 
     await target.answer(
-        f"<b>Step {idx + 1}/{len(STEPS)}</b>\n\n{PROMPTS[STEPS[idx]]}",
+        f"<b>Step {idx + 1}/{len(STEPS)}</b>\n\n"
+        f"{PROMPTS[STEPS[idx]]}",
         reply_markup=nav_kb(idx),
     )
 
@@ -147,14 +150,21 @@ async def advance(
 
     form = data.get("form", {})
 
+    if not isinstance(form, dict):
+        await state.clear()
+        await target.answer(
+            "⚠️ Your setup data is invalid. Please start again with /create."
+        )
+        return
+
     if value is not None:
         form[key] = value
 
-    idx = data["step"] + 1
+    next_idx = data["step"] + 1
 
-    await state.update_data(form=form, step=idx)
+    await state.update_data(form=form, step=next_idx)
 
-    if idx >= len(STEPS):
+    if next_idx >= len(STEPS):
         await finish(target, state, bot, user_id)
     else:
         await show_step(target, state)
@@ -169,6 +179,11 @@ async def finish(
     data = await state.get_data()
     form = data.get("form", {})
 
+    if not isinstance(form, dict):
+        await state.clear()
+        await target.answer("⚠️ Invalid setup data. Please start again with /create.")
+        return
+
     if not form.get("duration"):
         await state.clear()
         await target.answer(
@@ -176,49 +191,85 @@ async def finish(
         )
         return
 
-    ends_at = utcnow() + timedelta(seconds=form["duration"])
+    # Defaults for optional fields.
+    form.setdefault("rules", "")
+    form.setdefault("channels", [])
+    form.setdefault("poster_file_id", None)
+    form.setdefault("theme", "neon")
+    form.setdefault("max", None)
+    form.setdefault("confirm", None)
+    form.setdefault("public", True)
 
-    async with session_scope() as s:
-        gw = await create_giveaway(s, user_id, form, ends_at)
+    start_at = utcnow()
+    ends_at = start_at + timedelta(seconds=form["duration"])
 
-        await audit.record(
-            s,
-            "giveaway_created",
-            user_id,
-            gw.id,
-            title=gw.title,
-            winners=gw.winners_count,
-            channels=len(form.get("channels", [])),
+    try:
+        async with session_scope() as s:
+            gw = await create_giveaway(
+                s,
+                user_id,
+                form,
+                ends_at,
+            )
+
+            await audit.record(
+                s,
+                "giveaway_created",
+                user_id,
+                gw.id,
+                title=gw.title,
+                winners=gw.winners_count,
+                channels=len(form.get("channels", [])),
+            )
+
+        # Clear the FSM only after the database transaction succeeds.
+        await state.clear()
+
+        await target.answer(
+            f"✅ <b>Giveaway created!</b> 🆔 <b>{gw.code}</b>\n"
+            "Here's your post preview:"
         )
 
-    await state.clear()
+        await posts.send_post(bot, user_id, gw)
 
-    await target.answer(
-        f"✅ <b>Giveaway created!</b> 🆔 <b>{gw.code}</b>\n"
-        "Here's your post preview:"
-    )
+        await target.answer(
+            "What next?",
+            reply_markup=Kb(
+                inline_keyboard=[
+                    [
+                        Btn(
+                            text="📣 Publish to a channel",
+                            callback_data=GwCb(
+                                a="publish",
+                                id=gw.id,
+                            ).pack(),
+                        )
+                    ],
+                    [
+                        Btn(
+                            text="📊 Manage",
+                            callback_data=GwCb(
+                                a="menu",
+                                id=gw.id,
+                            ).pack(),
+                        )
+                    ],
+                ]
+            ),
+        )
 
-    await posts.send_post(bot, user_id, gw)
+        await audit.flush(bot)
 
-    await target.answer(
-        "What next?",
-        reply_markup=Kb(inline_keyboard=[
-            [
-                Btn(
-                    text="📣 Publish to a channel",
-                    callback_data=GwCb(a="publish", id=gw.id).pack(),
-                )
-            ],
-            [
-                Btn(
-                    text="📊 Manage",
-                    callback_data=GwCb(a="menu", id=gw.id).pack(),
-                )
-            ],
-        ]),
-    )
+    except Exception:
+        logger.exception(
+            "Giveaway creation failed for Telegram user %s",
+            user_id,
+        )
 
-    await audit.flush(bot)
+        await target.answer(
+            "❌ Giveaway creation failed. Your setup data has been kept. "
+            "Please check the bot logs or contact the owner."
+        )
 
 
 @router.message(Command("create"))
@@ -250,7 +301,10 @@ async def on_back(cb: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
 
     if not valid_step(data):
-        await cb.answer("This setup session is invalid. Start again with /create.", show_alert=True)
+        await cb.answer(
+            "This setup session is invalid. Start again with /create.",
+            show_alert=True,
+        )
         await state.clear()
         return
 
@@ -270,7 +324,10 @@ async def on_skip(
     data = await state.get_data()
 
     if not valid_step(data):
-        await cb.answer("This step is already completed or invalid.", show_alert=True)
+        await cb.answer(
+            "This step is already completed or invalid.",
+            show_alert=True,
+        )
         return
 
     key = STEPS[data["step"]]
@@ -280,7 +337,13 @@ async def on_skip(
         return
 
     await cb.answer()
-    await advance(cb.message, state, bot, cb.from_user.id, key)
+    await advance(
+        cb.message,
+        state,
+        bot,
+        cb.from_user.id,
+        key,
+    )
 
 
 @router.callback_query(Create.active, F.data.startswith("cr:theme:"))
@@ -321,13 +384,18 @@ async def on_visibility(
 ) -> None:
     data = await state.get_data()
 
-    # Prevent IndexError if the final step has already advanced to 11.
     if not valid_step(data):
-        await cb.answer("This giveaway setup has already finished.")
+        await cb.answer(
+            "This giveaway setup has already finished.",
+            show_alert=True,
+        )
         return
 
     if STEPS[data["step"]] != "visibility":
-        await cb.answer("Please complete the current step first.")
+        await cb.answer(
+            "Please complete the current step first.",
+            show_alert=True,
+        )
         return
 
     is_public = cb.data.endswith(":1")
@@ -363,7 +431,9 @@ async def on_input(
     uid = message.from_user.id
 
     if message.text and message.text.startswith("/"):
-        await message.answer("Finish the steps, or use /cancel to abort.")
+        await message.answer(
+            "Finish the steps, or use /cancel to abort."
+        )
         return
 
     if key == "poster":
@@ -377,7 +447,9 @@ async def on_input(
                 message.photo[-1].file_id,
             )
         else:
-            await message.answer("🖼 Send a photo, or pick a theme below.")
+            await message.answer(
+                "🖼 Send a photo, or pick a theme below."
+            )
         return
 
     if key == "visibility":
@@ -390,19 +462,35 @@ async def on_input(
 
     if key == "channels":
         form = data.get("form", {})
+
+        if not isinstance(form, dict):
+            await state.clear()
+            await message.answer(
+                "⚠️ Your setup data is invalid. Start again with /create."
+            )
+            return
+
         found = form.setdefault("channels", [])
         report = []
 
-        for line in [
-            ln for ln in message.text.splitlines() if ln.strip()
-        ]:
+        for line in message.text.splitlines():
+            line = line.strip()
+
+            if not line:
+                continue
+
             try:
                 ref = await resolve(bot, line)
             except ChannelError as exc:
-                report.append(f"⚠️ <code>{line[:40]}</code>: {exc}")
+                report.append(
+                    f"⚠️ <code>{line[:40]}</code>: {exc}"
+                )
                 continue
 
-            if any(c["chat_id"] == ref.chat_id for c in found):
+            if any(
+                channel["chat_id"] == ref.chat_id
+                for channel in found
+            ):
                 report.append(f"ℹ️ {ref.title} already added")
                 continue
 
@@ -424,6 +512,9 @@ async def on_input(
 
         await state.update_data(form=form)
 
+        if not report:
+            report.append("No channels were added.")
+
         await message.answer(
             "\n".join(report)
             + f"\n\nTotal: {len(found)}. Send more or press Done.",
@@ -433,8 +524,15 @@ async def on_input(
 
     try:
         value = VALIDATORS[key](message.text)
-    except ValueError as exc:
+    except (ValueError, KeyError) as exc:
         await message.answer(f"⚠️ {exc}")
         return
 
-    await advance(message, state, bot, uid, key, value)
+    await advance(
+        message,
+        state,
+        bot,
+        uid,
+        key,
+        value,
+    )
