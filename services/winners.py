@@ -102,7 +102,16 @@ async def finalize(bot: Bot, redis: Redis, gid: int) -> list[int] | None:
 async def winners_text(s: AsyncSession, gw: Giveaway, ws: list[Winner]) -> str:
     if not ws:
         return (f"🏁 <b>{esc(gw.title)}</b> ({gw.code}) has ended.\n\n😕 No eligible participants this time.")
-    users = {u.id: u for u in (await s.execute(select(User).where(User.id.in_([w.user_id for w in ws])))).scalars()}
+    users = {
+    u.id: u
+    for u in (
+        await s.execute(
+            select(User).where(
+                User.id.in_([w.user_id for w in wins])
+            )
+        )
+    ).scalars()
+    }
     lines = [f"🏁 <b>{esc(gw.title)}</b> ({gw.code}) has ended!", "", "🏆 <b>Winners</b>"]
     for w in ws:
         u = users.get(w.user_id)
