@@ -20,14 +20,19 @@ class Base(DeclarativeBase):
     pass
 
 
+
 class User(Base):
     __tablename__ = "users"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(64), index=True)
     full_name: Mapped[str] = mapped_column(String(256), default="")
     wins_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+
+
 
 
 class Giveaway(Base):
