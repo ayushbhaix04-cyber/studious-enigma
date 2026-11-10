@@ -1,9 +1,11 @@
+
 from __future__ import annotations
 
 from functools import lru_cache
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -19,7 +21,13 @@ class Settings(BaseSettings):
     captcha_ttl: int = 300
     run_migrations_on_start: bool = True
 
-    @field_validator("log_channel_id", "redis_url", "redis_public_url", "bot_username", mode="before")
+    @field_validator(
+        "log_channel_id",
+        "redis_url",
+        "redis_public_url",
+        "bot_username",
+        mode="before",
+    )
     @classmethod
     def _empty_to_none(cls, v):
         return None if isinstance(v, str) and not v.strip() else v
@@ -29,17 +37,50 @@ class Settings(BaseSettings):
     def _normalize_db(cls, v: str) -> str:
         if v.startswith("postgres://"):
             v = "postgresql://" + v[len("postgres://"):]
+
         if v.startswith("postgresql://"):
             v = "postgresql+asyncpg://" + v[len("postgresql://"):]
+
         return v
 
     @property
     def sync_database_url(self) -> str:
-        return self.database_url.replace("+asyncpg", "+psycopg2").replace("sqlite+aiosqlite", "sqlite")
+        # Convert asyncpg URL to psycopg2 URL for APScheduler.
+        url = make_url(
+            self.database_url.replace(
+                "postgresql+asyncpg://",
+                "postgresql+psycopg2://",
+            )
+        )
+
+        # psycopg2 expects sslmode, not asyncpg's ssl parameter.
+        query = dict(url.query)
+        ssl = query.pop("ssl", None)
+
+        if ssl is not None:
+            ssl_value = str(ssl).lower()
+
+            if ssl_value in ("true", "1", "yes", "require"):
+                query["sslmode"] = "require"
+            elif ssl_value in ("false", "0", "no", "disable"):
+                query["sslmode"] = "disable"
+            else:
+                query["sslmode"] = ssl_value
+
+        return url.set(query=query).render_as_string(
+            hide_password=False
+        ).replace(
+            "sqlite+aiosqlite://",
+            "sqlite://",
+        )
 
     @property
     def redis_dsn(self) -> str:
-        return self.redis_url or self.redis_public_url or "redis://localhost:6379/0"
+        return (
+            self.redis_url
+            or self.redis_public_url
+            or "redis://localhost:6379/0"
+        )
 
 
 @lru_cache
