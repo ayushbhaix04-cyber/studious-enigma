@@ -166,7 +166,11 @@ async def reroll(bot: Bot, gid: int, winner_row_id: int, actor_id: int) -> int |
             return None
         w.is_active, w.replaced_at = False, utcnow()
         s.add(Winner(giveaway_id=gid, user_id=chosen[0], position=w.position, selection_type="reroll"))
-        await s.execute(update(User).where(User.id == chosen[0]).values(wins_count=User.wins_count + 1))
+        await s.execute(
+    update(User)
+    .where(User.tg_id == chosen[0])
+    .values(wins_count=User.wins_count + 1)
+                  )
         await audit.record(s, "winner_rerolled", actor_id, gid, replaced=w.user_id, new=chosen[0])
     await announce(bot, gid, notify=[chosen[0]])
     await audit.flush(bot)
