@@ -85,12 +85,14 @@ async def referral_count(s: AsyncSession, gid: int, user_id: int | None = None) 
 
 
 
+
 async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
     name = " ".join(
         p for p in (
             tg_user.first_name,
-            getattr(tg_user, "last_name", None)
-        ) if p
+            getattr(tg_user, "last_name", None),
+        )
+        if p
     )
 
     u = (
@@ -103,7 +105,8 @@ async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
         u = User(
             tg_id=tg_user.id,
             username=tg_user.username,
-            full_name=name
+            full_name=name,
+            last_seen_at=utcnow(),
         )
         s.add(u)
     else:
@@ -112,4 +115,3 @@ async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
         u.last_seen_at = utcnow()
 
     return u
-
