@@ -19,7 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
-BigPK = BigInteger().with_variant(Integer, "sqlite")
+BigPK = Integer
 TS = DateTime(timezone=True)
 
 
