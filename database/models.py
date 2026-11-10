@@ -19,6 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
+# Neon uses INTEGER for these internal primary keys.
 BigPK = Integer
 TS = DateTime(timezone=True)
 
@@ -34,7 +35,7 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    # Internal database ID — not the Telegram ID
+    # Internal database ID, not Telegram ID
     id: Mapped[int] = mapped_column(
         Integer,
         primary_key=True,
@@ -87,16 +88,26 @@ class Giveaway(Base):
         primary_key=True,
         autoincrement=True,
     )
-    host_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    host_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
     title: Mapped[str] = mapped_column(String(120), nullable=False)
     prize: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+
     winners_count: Mapped[int] = mapped_column(
         Integer,
         default=1,
         server_default=text("1"),
         nullable=False,
     )
+
     poster_file_id: Mapped[str | None] = mapped_column(String(256))
     poster_theme: Mapped[str] = mapped_column(
         String(32),
@@ -104,15 +115,43 @@ class Giveaway(Base):
         server_default=text("'neon'"),
         nullable=False,
     )
-    rules: Mapped[str | None] = mapped_column(Text)
+
+    rules: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        nullable=False,
+    )
+
     max_participants: Mapped[int | None] = mapped_column(Integer)
     confirm_message: Mapped[str | None] = mapped_column(Text)
+
+    start_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
     is_public: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
         server_default=text("true"),
         nullable=False,
     )
+
+    referral_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+    bonus_per_referral: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
     # active | paused | ending | completed | cancelled
     status: Mapped[str] = mapped_column(
         String(16),
@@ -121,18 +160,22 @@ class Giveaway(Base):
         index=True,
         nullable=False,
     )
-    ends_at: Mapped[datetime] = mapped_column(TS, index=True, nullable=False)
+
+    ends_at: Mapped[datetime] = mapped_column(
+        TS,
+        index=True,
+        nullable=False,
+    )
+
     paused_at: Mapped[datetime | None] = mapped_column(TS)
+
     created_at: Mapped[datetime] = mapped_column(
         TS,
         default=utcnow,
         nullable=False,
     )
-    ended_at: Mapped[datetime | None] = mapped_column(TS)
 
-    @property
-    def code(self) -> str:
-        return f"GW-{10000 + self.id}"
+    ended_at: Mapped[datetime | None] = mapped_column(TS)
 
     @property
     def payload(self) -> str:
@@ -142,7 +185,11 @@ class Giveaway(Base):
 class GiveawayChannel(Base):
     __tablename__ = "giveaway_channels"
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     giveaway_id: Mapped[int] = mapped_column(
         ForeignKey("giveaways.id", ondelete="CASCADE"),
         index=True,
@@ -157,82 +204,191 @@ class GiveawayChannel(Base):
 
 class Participant(Base):
     __tablename__ = "participants"
+
     __table_args__ = (
-        UniqueConstraint("giveaway_id", "user_id", name="uq_participant"),
+        UniqueConstraint(
+            "giveaway_id",
+            "user_id",
+            name="uq_participant",
+        ),
     )
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     giveaway_id: Mapped[int] = mapped_column(
         ForeignKey("giveaways.id", ondelete="CASCADE"),
         index=True,
     )
-    # Telegram user IDs must be BIGINT
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+
+    # Telegram user IDs
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+    )
+
+    username_snapshot: Mapped[str | None] = mapped_column(
+        String(64),
+    )
+
+    display_name_snapshot: Mapped[str] = mapped_column(
+        String(256),
+        default="",
+        nullable=False,
+    )
+
+    joined_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+    eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    extra_entries: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
     referrer_id: Mapped[int | None] = mapped_column(BigInteger)
-    joined_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
 
 
 class Winner(Base):
     __tablename__ = "winners"
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     giveaway_id: Mapped[int] = mapped_column(
         ForeignKey("giveaways.id", ondelete="CASCADE"),
         index=True,
     )
-    # Telegram user IDs must be BIGINT
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    position: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Telegram user ID
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+    )
+
+    position: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+
     # random | reroll | owner_override
     selection_type: Mapped[str] = mapped_column(
         String(16),
         default="random",
+        nullable=False,
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
     replaced_at: Mapped[datetime | None] = mapped_column(TS)
 
 
 class GlobalChannel(Base):
     __tablename__ = "global_force_join_channels"
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     chat_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     title: Mapped[str] = mapped_column(String(256), default="")
     username: Mapped[str | None] = mapped_column(String(64))
     invite_link: Mapped[str | None] = mapped_column(String(256))
     join_request: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+    )
 
 
 class Referral(Base):
     __tablename__ = "referrals"
+
     __table_args__ = (
-        UniqueConstraint("giveaway_id", "referred_id", name="uq_referral"),
+        UniqueConstraint(
+            "giveaway_id",
+            "referred_id",
+            name="uq_referral",
+        ),
     )
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     giveaway_id: Mapped[int] = mapped_column(
         ForeignKey("giveaways.id", ondelete="CASCADE"),
         index=True,
     )
-    referrer_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    referrer_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+    )
     referred_id: Mapped[int] = mapped_column(BigInteger)
-    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+
+    verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
 
 
 class PublishedMessage(Base):
     __tablename__ = "published_messages"
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     giveaway_id: Mapped[int] = mapped_column(
         ForeignKey("giveaways.id", ondelete="CASCADE"),
         index=True,
     )
     chat_id: Mapped[int] = mapped_column(BigInteger)
     message_id: Mapped[int] = mapped_column(BigInteger)
-    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+    )
 
 
 class BannedUser(Base):
@@ -245,17 +401,27 @@ class BannedUser(Base):
     )
     reason: Mapped[str | None] = mapped_column(Text)
     banned_by: Mapped[int] = mapped_column(BigInteger)
-    banned_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    banned_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+    )
 
 
 class LogEvent(Base):
     __tablename__ = "log_events"
 
-    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
     event: Mapped[str] = mapped_column(String(64), index=True)
     actor_id: Mapped[int | None] = mapped_column(BigInteger)
     giveaway_id: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+    )
     delivered: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -267,11 +433,20 @@ class LogEvent(Base):
         default=0,
         server_default=text("0"),
     )
-    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+    )
 
 
 class BotSetting(Base):
     __tablename__ = "bot_settings"
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    value: Mapped[str] = mapped_column(Text, default="")
+    key: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+    value: Mapped[str] = mapped_column(
+        Text,
+        default="",
+    )
