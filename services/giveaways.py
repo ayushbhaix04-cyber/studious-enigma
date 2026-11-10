@@ -84,6 +84,7 @@ async def referral_count(s: AsyncSession, gid: int, user_id: int | None = None) 
 
 
 
+
 async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
     name = " ".join(
         p for p in (
@@ -111,3 +112,4 @@ async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
         u.last_seen_at = utcnow()
 
     return u
+
