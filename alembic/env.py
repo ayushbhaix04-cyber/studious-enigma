@@ -12,12 +12,18 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from config import get_settings
 from database.models import Base
 
+
 # Alembic configuration
 config = context.config
 
-# Configure logging from alembic.ini
-if config.config_file_name is not None:
+
+# Configure logging only when the required section exists
+if (
+    config.config_file_name is not None
+    and config.file_config.has_section("formatters")
+):
     fileConfig(config.config_file_name)
+
 
 # Register SQLAlchemy models
 target_metadata = Base.metadata
@@ -68,7 +74,6 @@ async def run_async_migrations() -> None:
     """Create an async engine and run migrations."""
 
     configuration = config.get_section(config.config_ini_section) or {}
-
     configuration["sqlalchemy.url"] = get_database_url()
 
     connectable = async_engine_from_config(
