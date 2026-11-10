@@ -35,13 +35,34 @@ async def create_giveaway(
     form: dict[str, Any],
     ends_at: datetime,
 ) -> Giveaway:
-    """Create a giveaway and its mandatory channel requirements."""
+    """
+    Create a giveaway and its mandatory channel requirements.
+
+    host_id is the Telegram user ID received from the handler.
+    Giveaway.host_id stores the internal users.id value.
+    """
+
+    # Find the user using their Telegram ID.
+    host = (
+        await s.execute(
+            select(User).where(User.tg_id == host_id)
+        )
+    ).scalar_one_or_none()
+
+    if host is None:
+        raise ValueError(
+            f"Host user {host_id} was not found. "
+            "Make sure upsert_user() runs before create_giveaway()."
+        )
 
     now = utcnow()
 
     gw = Giveaway(
         code=generate_giveaway_code(),
-        host_id=host_id,
+
+        # Store internal database ID, NOT Telegram ID.
+        host_id=host.id,
+
         title=form["title"],
         prize=form["prize"],
         description=form.get("description") or "",
@@ -77,6 +98,7 @@ async def create_giveaway(
         )
 
     await s.flush()
+
     return gw
 
 
@@ -89,6 +111,7 @@ async def lock_giveaway(
         .where(Giveaway.id == gid)
         .with_for_update()
     )
+
     return result.scalar_one_or_none()
 
 
@@ -101,6 +124,7 @@ async def count_participants(
         .select_from(Participant)
         .where(Participant.giveaway_id == gid)
     )
+
     return result.scalar_one()
 
 
@@ -121,6 +145,7 @@ async def channels_of(
         )
 
     result = await s.execute(query)
+
     return list(result.scalars().all())
 
 
@@ -131,7 +156,13 @@ async def register_participant(
     referrer_id: int | None = None,
     tg_user: Any | None = None,
 ) -> JoinResult:
-    """Register a participant and optionally save their Telegram profile."""
+    """
+    Register a participant.
+
+    user_id and referrer_id are Telegram IDs.
+    Participant.user_id and Referral IDs are expected
+    to store Telegram IDs in the current schema.
+    """
 
     gw = await lock_giveaway(s, gid)
 
@@ -142,7 +173,10 @@ async def register_participant(
     ):
         return "closed"
 
-    if gw.host_id == user_id:
+    # Resolve the host's Telegram ID before comparing.
+    host = await s.get(User, gw.host_id)
+
+    if host is not None and host.tg_id == user_id:
         return "own"
 
     if (
@@ -186,6 +220,7 @@ async def register_participant(
                     referrer_id=safe_referrer_id,
                 )
             )
+
             await s.flush()
 
     except IntegrityError:
@@ -211,6 +246,7 @@ async def register_participant(
                             referred_id=user_id,
                         )
                     )
+
                     await s.flush()
 
             except IntegrityError:
@@ -240,6 +276,7 @@ async def referral_count(
         )
 
     result = await s.execute(query)
+
     return result.scalar_one()
 
 
@@ -273,6 +310,7 @@ async def upsert_user(
             full_name=name,
             last_seen_at=utcnow(),
         )
+
         s.add(user)
 
     else:
