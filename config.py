@@ -53,14 +53,13 @@ class Settings(BaseSettings):
             hide_password=False
         )
 
-    @property
+     @property
     def sync_database_url(self) -> str:
-        # Convert asyncpg URL to psycopg2 URL for APScheduler
-        url = make_url(
-            self.database_url.replace(
-                "+asyncpg",
-                "+psycopg2",
-            )
+    url = self.database_url.replace(
+        "+asyncpg", "+psycopg2"
+    )
+    url = url.replace("ssl=require", "sslmode=require")
+    return url
         )
 
         query = dict(url.query)
