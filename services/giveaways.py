@@ -26,7 +26,6 @@ JoinResult = Literal["ok", "full", "closed", "duplicate", "own"]
 
 
 def generate_giveaway_code() -> str:
-    """Generate a short, hard-to-guess giveaway code."""
     return f"GW-{secrets.token_hex(4).upper()}"
 
 
@@ -37,6 +36,8 @@ async def create_giveaway(
     ends_at: datetime,
 ) -> Giveaway:
     """Create a giveaway and its mandatory channel requirements."""
+
+    now = utcnow()
 
     gw = Giveaway(
         code=generate_giveaway_code(),
@@ -50,27 +51,27 @@ async def create_giveaway(
         poster_theme=form.get("theme") or "neon",
         max_participants=form.get("max"),
         confirm_message=form.get("confirm"),
-        start_at=utcnow(),
+        start_at=now,
         ends_at=ends_at,
         is_public=form.get("public", True),
         referral_enabled=False,
         bonus_per_referral=0,
         status="active",
-        created_at=utcnow(),
+        created_at=now,
     )
 
     s.add(gw)
     await s.flush()
 
-    for ch in form.get("channels") or []:
+    for channel in form.get("channels") or []:
         s.add(
             GiveawayChannel(
                 giveaway_id=gw.id,
-                chat_id=ch["chat_id"],
-                title=ch.get("title") or "",
-                username=ch.get("username"),
-                invite_link=ch.get("invite_link"),
-                join_request=ch.get("join_request", False),
+                chat_id=channel["chat_id"],
+                title=channel.get("title") or "",
+                username=channel.get("username"),
+                invite_link=channel.get("invite_link"),
+                join_request=channel.get("join_request", False),
                 is_mandatory=True,
             )
         )
@@ -83,7 +84,6 @@ async def lock_giveaway(
     s: AsyncSession,
     gid: int,
 ) -> Giveaway | None:
-    """Lock a giveaway row while changing its state."""
     result = await s.execute(
         select(Giveaway)
         .where(Giveaway.id == gid)
@@ -129,8 +129,9 @@ async def register_participant(
     gid: int,
     user_id: int,
     referrer_id: int | None = None,
+    tg_user: Any | None = None,
 ) -> JoinResult:
-    """Register a participant while enforcing giveaway rules."""
+    """Register a participant and optionally save their Telegram profile."""
 
     gw = await lock_giveaway(s, gid)
 
@@ -145,10 +146,34 @@ async def register_participant(
         return "own"
 
     if (
-        gw.max_participants
+        gw.max_participants is not None
         and await count_participants(s, gid) >= gw.max_participants
     ):
         return "full"
+
+    safe_referrer_id = (
+        referrer_id
+        if referrer_id is not None and referrer_id != user_id
+        else None
+    )
+
+    username_snapshot = (
+        getattr(tg_user, "username", None)
+        if tg_user is not None
+        else None
+    )
+
+    display_name_snapshot = ""
+
+    if tg_user is not None:
+        display_name_snapshot = " ".join(
+            part
+            for part in (
+                getattr(tg_user, "first_name", None),
+                getattr(tg_user, "last_name", None),
+            )
+            if part
+        )
 
     try:
         async with s.begin_nested():
@@ -156,11 +181,9 @@ async def register_participant(
                 Participant(
                     giveaway_id=gid,
                     user_id=user_id,
-                    referrer_id=(
-                        referrer_id
-                        if referrer_id != user_id
-                        else None
-                    ),
+                    username_snapshot=username_snapshot,
+                    display_name_snapshot=display_name_snapshot,
+                    referrer_id=safe_referrer_id,
                 )
             )
             await s.flush()
@@ -168,23 +191,23 @@ async def register_participant(
     except IntegrityError:
         return "duplicate"
 
-    if referrer_id and referrer_id != user_id:
-        ref_is_participant = (
+    if safe_referrer_id is not None:
+        referrer_is_participant = (
             await s.execute(
                 select(Participant.id).where(
                     Participant.giveaway_id == gid,
-                    Participant.user_id == referrer_id,
+                    Participant.user_id == safe_referrer_id,
                 )
             )
         ).first()
 
-        if ref_is_participant:
+        if referrer_is_participant:
             try:
                 async with s.begin_nested():
                     s.add(
                         Referral(
                             giveaway_id=gid,
-                            referrer_id=referrer_id,
+                            referrer_id=safe_referrer_id,
                             referred_id=user_id,
                         )
                     )
@@ -192,9 +215,8 @@ async def register_participant(
 
             except IntegrityError:
                 logger.info(
-                    "Referral already exists: giveaway=%s referrer=%s referred=%s",
+                    "Duplicate referral ignored: giveaway=%s referred=%s",
                     gid,
-                    referrer_id,
                     user_id,
                 )
 
@@ -225,12 +247,12 @@ async def upsert_user(
     s: AsyncSession,
     tg_user: Any,
 ) -> User:
-    """Insert or update a Telegram user using their Telegram ID."""
+    """Insert or update a user using their Telegram ID."""
 
     name = " ".join(
         part
         for part in (
-            tg_user.first_name,
+            getattr(tg_user, "first_name", None),
             getattr(tg_user, "last_name", None),
         )
         if part
