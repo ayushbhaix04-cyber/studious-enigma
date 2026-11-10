@@ -35,7 +35,11 @@ async def _resolve_user(ref: str) -> int | None:
             u = await s.get(User, int(ref))
             return u.id if u else None
         name = ref.lstrip("@").lower()
-        return (await s.execute(select(User.id).where(func.lower(User.username) == name))).scalars().first()
+        return (
+    await s.execute(
+        select(User.tg_id).where(func.lower(User.username) == name)
+    )
+).scalars().first()
 
 
 @router.message(Command("winner"))
