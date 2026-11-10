@@ -83,12 +83,31 @@ async def referral_count(s: AsyncSession, gid: int, user_id: int | None = None) 
     return (await s.execute(q)).scalar_one()
 
 
+
 async def upsert_user(s: AsyncSession, tg_user: Any) -> User:
-    name = " ".join(p for p in (tg_user.first_name, getattr(tg_user, "last_name", None)) if p)
-    u = await s.get(User, tg_user.id)
+    name = " ".join(
+        p for p in (
+            tg_user.first_name,
+            getattr(tg_user, "last_name", None)
+        ) if p
+    )
+
+    u = (
+        await s.execute(
+            select(User).where(User.tg_id == tg_user.id)
+        )
+    ).scalar_one_or_none()
+
     if u is None:
-        u = User(id=tg_user.id, username=tg_user.username, full_name=name)
+        u = User(
+            tg_id=tg_user.id,
+            username=tg_user.username,
+            full_name=name
+        )
         s.add(u)
     else:
-        u.username, u.full_name, u.last_seen_at = tg_user.username, name, utcnow()
+        u.username = tg_user.username
+        u.full_name = name
+        u.last_seen_at = utcnow()
+
     return u
