@@ -5,19 +5,24 @@ from functools import lru_cache
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore"
+    )
 
     bot_token: str
     bot_owner_id: int
     database_url: str
+
     redis_url: str | None = None
     redis_public_url: str | None = None
+
     log_channel_id: int | None = None
     bot_username: str | None = None
+
     captcha_ttl: int = 300
     run_migrations_on_start: bool = True
 
@@ -26,7 +31,7 @@ class Settings(BaseSettings):
         "redis_url",
         "redis_public_url",
         "bot_username",
-        mode="before",
+        mode="before"
     )
     @classmethod
     def _empty_to_none(cls, v):
@@ -41,43 +46,21 @@ class Settings(BaseSettings):
         if v.startswith("postgresql://"):
             v = "postgresql+asyncpg://" + v[len("postgresql://"):]
 
-        # asyncpg uses ssl, not sslmode
-        url = make_url(v)
-        query = dict(url.query)
-        sslmode = query.pop("sslmode", None)
+        return v
 
-        if sslmode is not None:
-            query["ssl"] = sslmode
-
-        return url.set(query=query).render_as_string(
-            hide_password=False
-        )
-
-     @property
+    @property
     def sync_database_url(self) -> str:
-    url = self.database_url.replace(
-        "+asyncpg", "+psycopg2"
-    )
-    url = url.replace("ssl=require", "sslmode=require")
-    return url
+        url = self.database_url.replace(
+            "+asyncpg",
+            "+psycopg2"
         )
 
-        query = dict(url.query)
-        ssl = query.pop("ssl", None)
-
-        if ssl is not None:
-            ssl_value = str(ssl).lower()
-
-            if ssl_value in ("true", "1", "yes", "require"):
-                query["sslmode"] = "require"
-            elif ssl_value in ("false", "0", "no", "disable"):
-                query["sslmode"] = "disable"
-            else:
-                query["sslmode"] = ssl_value
-
-        return url.set(query=query).render_as_string(
-            hide_password=False
+        url = url.replace(
+            "ssl=require",
+            "sslmode=require"
         )
+
+        return url
 
     @property
     def redis_dsn(self) -> str:
@@ -90,4 +73,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
