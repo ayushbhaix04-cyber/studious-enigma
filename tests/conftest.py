@@ -68,9 +68,9 @@ def bot():
 async def make_giveaway(n_users: int = 10, winners: int = 3, **over) -> int:
     """Create a host, n users, a giveaway and enter every user. Returns the giveaway id."""
     async with dbs.session_scope() as s:
-        s.add(User(id=HOST, username="host", full_name="Host"))
+        s.add(User(tg_id=HOST, username="host", full_name="Host"))
         for i in range(1, n_users + 1):
-            s.add(User(id=5000 + i, username=f"user{i}", full_name=f"User {i}"))
+            s.add(User(tg_id=5000 + i, username=f"user{i}", full_name=f"User {i}"))
         gw = Giveaway(host_id=HOST, title="T", prize="P", description="D", winners_count=winners,
                       ends_at=utcnow() + timedelta(hours=1), **over)
         s.add(gw)
