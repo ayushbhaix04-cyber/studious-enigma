@@ -19,23 +19,49 @@ log = logging.getLogger(__name__)
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 
 
+
 class AccessMiddleware(BaseMiddleware):
     """Registers the user and silently drops everything from banned users."""
 
-    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+    async def __call__(
+        self,
+        handler: Handler,
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
         user = data.get("event_from_user")
+
         if user is None or user.is_bot:
             return await handler(event, data)
-        async with session_scope() as s:
-            await upsert_user(s, user)
-            banned = user.id != get_settings().bot_owner_id and await s.get(BannedUser, user.id) is not None
+
+        try:
+            async with session_scope() as s:
+                await upsert_user(s, user)
+
+                banned = (
+                    user.id != get_settings().bot_owner_id
+                    and await s.get(BannedUser, user.id) is not None
+                )
+        except Exception:
+            log.exception(
+                "Failed to register/check user in database: %s",
+                user.id,
+            )
+            raise
+
         if banned:
             if isinstance(event, CallbackQuery):
-                await event.answer("🚫 You are banned from this bot.", show_alert=True)
+                await event.answer(
+                    "🚫 You are banned from this bot.",
+                    show_alert=True,
+                )
             elif isinstance(event, Message):
                 await event.answer("🚫 You are banned from this bot.")
+
             return None
+
         return await handler(event, data)
+
 
 
 class ThrottleMiddleware(BaseMiddleware):
