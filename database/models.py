@@ -1,270 +1,568 @@
 
 from __future__ import annotations
 
-import logging
-import secrets
-from datetime import datetime
-from typing import Any, Literal
+from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from database.models import (
-    Giveaway,
-    GiveawayChannel,
-    Participant,
-    Referral,
-    User,
-    utcnow,
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
 )
-from utils.text import as_utc
-
-logger = logging.getLogger(__name__)
-
-JoinResult = Literal["ok", "full", "closed", "duplicate", "own"]
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
-def generate_giveaway_code() -> str:
-    """Generate a random giveaway code."""
-    return f"GW-{secrets.token_hex(4).upper()}"
+# Neon uses INTEGER for internal primary keys.
+BigPK = Integer
+TS = DateTime(timezone=True)
 
 
-async def create_giveaway(
-    s: AsyncSession,
-    host_id: int,
-    form: dict[str, Any],
-    ends_at: datetime,
-) -> Giveaway:
-    """Create a giveaway and its required channel records."""
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-    now = utcnow()
 
-    gw = Giveaway(
-        code=generate_giveaway_code(),
-        host_id=host_id,
-        title=form["title"],
-        prize=form["prize"],
-        description=form.get("description") or "",
-        rules=form.get("rules") or "",
-        winners_count=int(form["winners"]),
-        poster_file_id=form.get("poster_file_id"),
-        poster_theme=form.get("theme") or "neon",
-        max_participants=form.get("max"),
-        confirm_message=form.get("confirm"),
-        start_at=now,
-        ends_at=ends_at,
-        is_public=form.get("public", True),
-        referral_enabled=False,
-        bonus_per_referral=0,
-        status="active",
-        created_at=now,
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
 
-    s.add(gw)
-    await s.flush()
-
-    for ch in form.get("channels") or []:
-        s.add(
-            GiveawayChannel(
-                giveaway_id=gw.id,
-                chat_id=ch["chat_id"],
-                title=ch.get("title") or "",
-                username=ch.get("username"),
-                invite_link=ch.get("invite_link"),
-                join_request=ch.get("join_request", False),
-                is_mandatory=True,
-            )
-        )
-
-    await s.flush()
-
-    return gw
-
-
-async def lock_giveaway(
-    s: AsyncSession,
-    gid: int,
-) -> Giveaway | None:
-    """Lock a giveaway row while changing its state."""
-
-    result = await s.execute(
-        select(Giveaway)
-        .where(Giveaway.id == gid)
-        .with_for_update()
+    # Telegram user ID, not the internal database ID.
+    tg_id: Mapped[int] = mapped_column(
+        BigInteger,
+        unique=True,
+        index=True,
+        nullable=False,
     )
 
-    return result.scalar_one_or_none()
+    username: Mapped[str | None] = mapped_column(String(64), index=True)
 
-
-async def count_participants(
-    s: AsyncSession,
-    gid: int,
-) -> int:
-    result = await s.execute(
-        select(func.count())
-        .select_from(Participant)
-        .where(Participant.giveaway_id == gid)
+    full_name: Mapped[str] = mapped_column(
+        String(256),
+        default="",
+        nullable=False,
     )
 
-    return result.scalar_one()
-
-
-async def channels_of(
-    s: AsyncSession,
-    gid: int,
-    mandatory_only: bool = False,
-) -> list[GiveawayChannel]:
-    query = (
-        select(GiveawayChannel)
-        .where(GiveawayChannel.giveaway_id == gid)
-        .order_by(GiveawayChannel.id)
+    wins_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
     )
 
-    if mandatory_only:
-        query = query.where(
-            GiveawayChannel.is_mandatory.is_(True)
-        )
-
-    result = await s.execute(query)
-
-    return list(result.scalars().all())
-
-
-async def register_participant(
-    s: AsyncSession,
-    gid: int,
-    user_id: int,
-    referrer_id: int | None = None,
-) -> JoinResult:
-    """Register a participant while enforcing giveaway rules."""
-
-    gw = await lock_giveaway(s, gid)
-
-    if (
-        gw is None
-        or gw.status != "active"
-        or as_utc(gw.ends_at) <= utcnow()
-    ):
-        return "closed"
-
-    if gw.host_id == user_id:
-        return "own"
-
-    if (
-        gw.max_participants is not None
-        and await count_participants(s, gid) >= gw.max_participants
-    ):
-        return "full"
-
-    safe_referrer_id = (
-        referrer_id
-        if referrer_id and referrer_id != user_id
-        else None
+    is_banned: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
 
-    try:
-        async with s.begin_nested():
-            s.add(
-                Participant(
-                    giveaway_id=gid,
-                    user_id=user_id,
-                    referrer_id=safe_referrer_id,
-                )
-            )
-            await s.flush()
-
-    except IntegrityError:
-        return "duplicate"
-
-    if safe_referrer_id is not None:
-        referrer_is_participant = (
-            await s.execute(
-                select(Participant.id).where(
-                    Participant.giveaway_id == gid,
-                    Participant.user_id == safe_referrer_id,
-                )
-            )
-        ).first()
-
-        if referrer_is_participant:
-            try:
-                async with s.begin_nested():
-                    s.add(
-                        Referral(
-                            giveaway_id=gid,
-                            referrer_id=safe_referrer_id,
-                            referred_id=user_id,
-                        )
-                    )
-                    await s.flush()
-
-            except IntegrityError:
-                logger.info(
-                    "Duplicate referral ignored: giveaway=%s referred=%s",
-                    gid,
-                    user_id,
-                )
-
-    return "ok"
-
-
-async def referral_count(
-    s: AsyncSession,
-    gid: int,
-    user_id: int | None = None,
-) -> int:
-    query = (
-        select(func.count())
-        .select_from(Referral)
-        .where(Referral.giveaway_id == gid)
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
     )
 
-    if user_id is not None:
-        query = query.where(
-            Referral.referrer_id == user_id
-        )
-
-    result = await s.execute(query)
-
-    return result.scalar_one()
-
-
-async def upsert_user(
-    s: AsyncSession,
-    tg_user: Any,
-) -> User:
-    """Insert or update a user using their Telegram ID."""
-
-    name = " ".join(
-        part
-        for part in (
-            tg_user.first_name,
-            getattr(tg_user, "last_name", None),
-        )
-        if part
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
     )
 
-    user = (
-        await s.execute(
-            select(User).where(
-                User.tg_id == tg_user.id
-            )
-        )
-    ).scalar_one_or_none()
 
-    if user is None:
-        user = User(
-            tg_id=tg_user.id,
-            username=tg_user.username,
-            full_name=name,
-            last_seen_at=utcnow(),
-        )
-        s.add(user)
+class Giveaway(Base):
+    __tablename__ = "giveaways"
 
-    else:
-        user.username = tg_user.username
-        user.full_name = name
-        user.last_seen_at = utcnow()
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
 
-    return user
+    code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    host_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+
+    prize: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    description: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    winners_count: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+
+    poster_file_id: Mapped[str | None] = mapped_column(String(256))
+
+    poster_theme: Mapped[str] = mapped_column(
+        String(32),
+        default="neon",
+        server_default=text("'neon'"),
+        nullable=False,
+    )
+
+    rules: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        server_default=text("''"),
+        nullable=False,
+    )
+
+    max_participants: Mapped[int | None] = mapped_column(Integer)
+
+    confirm_message: Mapped[str | None] = mapped_column(Text)
+
+    start_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+    is_public: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    referral_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+    bonus_per_referral: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(16),
+        default="active",
+        server_default=text("'active'"),
+        index=True,
+        nullable=False,
+    )
+
+    ends_at: Mapped[datetime] = mapped_column(
+        TS,
+        index=True,
+        nullable=False,
+    )
+
+    paused_at: Mapped[datetime | None] = mapped_column(TS)
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+    ended_at: Mapped[datetime | None] = mapped_column(TS)
+
+    @property
+    def payload(self) -> str:
+        return f"GW_{10000 + self.id}"
+
+
+class GiveawayChannel(Base):
+    __tablename__ = "giveaway_channels"
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(256),
+        default="",
+        nullable=False,
+    )
+
+    username: Mapped[str | None] = mapped_column(String(64))
+
+    invite_link: Mapped[str | None] = mapped_column(String(256))
+
+    join_request: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    is_mandatory: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+
+class Participant(Base):
+    __tablename__ = "participants"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "giveaway_id",
+            "user_id",
+            name="uq_participant",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # Telegram user ID.
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
+
+    username_snapshot: Mapped[str | None] = mapped_column(String(64))
+
+    display_name_snapshot: Mapped[str] = mapped_column(
+        String(256),
+        default="",
+        server_default=text("''"),
+        nullable=False,
+    )
+
+    joined_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+    eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    extra_entries: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
+    referrer_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class Winner(Base):
+    __tablename__ = "winners"
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # Telegram user ID.
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
+
+    position: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+
+    selection_type: Mapped[str] = mapped_column(
+        String(16),
+        default="random",
+        nullable=False,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+    replaced_at: Mapped[datetime | None] = mapped_column(TS)
+
+
+class GlobalChannel(Base):
+    __tablename__ = "global_force_join_channels"
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        unique=True,
+        nullable=False,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(256),
+        default="",
+        nullable=False,
+    )
+
+    username: Mapped[str | None] = mapped_column(String(64))
+
+    invite_link: Mapped[str | None] = mapped_column(String(256))
+
+    join_request: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "giveaway_id",
+            "referred_id",
+            name="uq_referral",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    referrer_id: Mapped[int] = mapped_column(
+        BigInteger,
+        index=True,
+        nullable=False,
+    )
+
+    referred_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+
+class PublishedMessage(Base):
+    __tablename__ = "published_messages"
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    message_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+
+class BannedUser(Base):
+    __tablename__ = "banned_users"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=False,
+    )
+
+    reason: Mapped[str | None] = mapped_column(Text)
+
+    banned_by: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    banned_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+
+class LogEvent(Base):
+    __tablename__ = "log_events"
+
+    id: Mapped[int] = mapped_column(
+        BigPK,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    event: Mapped[str] = mapped_column(
+        String(64),
+        index=True,
+        nullable=False,
+    )
+
+    actor_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    giveaway_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+    )
+
+    delivered: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        index=True,
+        nullable=False,
+    )
+
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        TS,
+        default=utcnow,
+        nullable=False,
+    )
+
+
+class BotSetting(Base):
+    __tablename__ = "bot_settings"
+
+    key: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+
+    value: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        server_default=text("''"),
+        nullable=False,
+    )
