@@ -182,8 +182,12 @@ async def owner_override(bot: Bot, gid: int, target_id: int, actor_id: int) -> O
         gw = await lock_giveaway(s, gid)
         if gw is None:
             return "no_giveaway"
-        if await s.get(User, target_id) is None:
-            return "no_user"
+        if (
+    await s.execute(
+        select(User).where(User.tg_id == target_id)
+    )
+).scalar_one_or_none() is None:
+    return "no_user"
         if gw.status == "cancelled":
             return "bad_status"
         existing = await active_winners(s, gid)
