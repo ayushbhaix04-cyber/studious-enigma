@@ -43,36 +43,35 @@ class Settings(BaseSettings):
 
         return v
 
-    @property
-    def sync_database_url(self) -> str:
-        # Convert asyncpg URL to psycopg2 URL for APScheduler.
-        url = make_url(
-            self.database_url.replace(
-                "postgresql+asyncpg://",
-                "postgresql+psycopg2://",
-            )
+
+@property
+def sync_database_url(self) -> str:
+    from sqlalchemy.engine import make_url
+
+    url = make_url(
+        self.database_url.replace(
+            "+asyncpg",
+            "+psycopg2",
         )
+    )
 
-        # psycopg2 expects sslmode, not asyncpg's ssl parameter.
-        query = dict(url.query)
-        ssl = query.pop("ssl", None)
+    query = dict(url.query)
+    ssl = query.pop("ssl", None)
 
-        if ssl is not None:
-            ssl_value = str(ssl).lower()
+    if ssl is not None:
+        ssl_value = str(ssl).lower()
 
-            if ssl_value in ("true", "1", "yes", "require"):
-                query["sslmode"] = "require"
-            elif ssl_value in ("false", "0", "no", "disable"):
-                query["sslmode"] = "disable"
-            else:
-                query["sslmode"] = ssl_value
+        if ssl_value in ("true", "1", "yes", "require"):
+            query["sslmode"] = "require"
+        elif ssl_value in ("false", "0", "no", "disable"):
+            query["sslmode"] = "disable"
+        else:
+            query["sslmode"] = ssl_value
 
-        return url.set(query=query).render_as_string(
-            hide_password=False
-        ).replace(
-            "sqlite+aiosqlite://",
-            "sqlite://",
-        )
+    return url.set(query=query).render_as_string(
+        hide_password=False
+    )
+
 
     @property
     def redis_dsn(self) -> str:
