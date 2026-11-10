@@ -44,6 +44,7 @@ class Settings(BaseSettings):
         return v
 
 
+
 @property
 def sync_database_url(self) -> str:
     from sqlalchemy.engine import make_url
@@ -71,6 +72,7 @@ def sync_database_url(self) -> str:
     return url.set(query=query).render_as_string(
         hide_password=False
     )
+
 
 
     @property
