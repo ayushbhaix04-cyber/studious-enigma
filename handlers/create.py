@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton as Btn,
     InlineKeyboardMarkup as Kb,
     Message,
+    User as TelegramUser,
 )
 
 from database.models import utcnow
@@ -22,7 +23,7 @@ from keyboards.menus import themes_kb
 from posters.generator import THEMES
 from services import audit, posts
 from services.channels import ChannelError, resolve
-from services.giveaways import create_giveaway
+from services.giveaways import create_giveaway, upsert_user
 from utils.validators import VALIDATORS
 
 router = Router(name="create")
@@ -64,7 +65,7 @@ PROMPTS = {
         "📢 <b>Required Channels</b> (optional)\n"
         "Send one per line:\n"
         "• <code>@channel</code> or <code>-100123…</code> (public / by id)\n"
-        "• <code>-100123… https://t.me/+invite</code> (private)\n"
+        "• <code>-100123… Join group chat on Te…</code> (private)\n"
         "• add <code>request</code> for join-request channels\n"
         "The bot must be an admin there. Press <b>Done / Skip</b> when finished."
     ),
@@ -139,7 +140,7 @@ async def advance(
     target: Message,
     state: FSMContext,
     bot: Bot,
-    user_id: int,
+    tg_user: TelegramUser,
     key: str,
     value=None,
 ) -> None:
@@ -165,7 +166,7 @@ async def advance(
     await state.update_data(form=form, step=next_idx)
 
     if next_idx >= len(STEPS):
-        await finish(target, state, bot, user_id)
+        await finish(target, state, bot, tg_user)
     else:
         await show_step(target, state)
 
@@ -174,14 +175,16 @@ async def finish(
     target: Message,
     state: FSMContext,
     bot: Bot,
-    user_id: int,
+    tg_user: TelegramUser,
 ) -> None:
     data = await state.get_data()
     form = data.get("form", {})
 
     if not isinstance(form, dict):
         await state.clear()
-        await target.answer("⚠️ Invalid setup data. Please start again with /create.")
+        await target.answer(
+            "⚠️ Invalid setup data. Please start again with /create."
+        )
         return
 
     if not form.get("duration"):
@@ -201,13 +204,23 @@ async def finish(
     form.setdefault("public", True)
 
     start_at = utcnow()
-    ends_at = start_at + timedelta(seconds=form["duration"])
+    ends_at = start_at + timedelta(seconds=int(form["duration"]))
 
+    # Create the user and giveaway in the same database transaction.
     try:
         async with session_scope() as s:
+
+            # Find or create the user using their Telegram profile.
+            host = await upsert_user(s, tg_user)
+
+            # Ensure users.id exists before inserting the giveaway.
+            await s.flush()
+
+            # create_giveaway receives the Telegram ID.
+            # It resolves that ID and stores host.id in Giveaway.host_id.
             gw = await create_giveaway(
                 s,
-                user_id,
+                tg_user.id,
                 form,
                 ends_at,
             )
@@ -215,23 +228,64 @@ async def finish(
             await audit.record(
                 s,
                 "giveaway_created",
-                user_id,
+                tg_user.id,
                 gw.id,
                 title=gw.title,
                 winners=gw.winners_count,
                 channels=len(form.get("channels", [])),
             )
 
-        # Clear the FSM only after the database transaction succeeds.
-        await state.clear()
+            giveaway_id = gw.id
+            giveaway_code = gw.code
 
-        await target.answer(
-            f"✅ <b>Giveaway created!</b> 🆔 <b>{gw.code}</b>\n"
-            "Here's your post preview:"
+    except Exception:
+        logger.exception(
+            "Giveaway database creation failed for Telegram user %s",
+            tg_user.id,
         )
 
-        await posts.send_post(bot, user_id, gw)
+        await target.answer(
+            "❌ Giveaway creation failed. Your setup data has been kept. "
+            "Please check the bot logs or contact the owner."
+        )
+        return
 
+    # The database transaction succeeded.
+    await state.clear()
+
+    logger.info(
+        "Giveaway %s created successfully by Telegram user %s",
+        giveaway_id,
+        tg_user.id,
+    )
+
+    try:
+        await target.answer(
+            f"✅ <b>Giveaway created!</b> 🆔 <b>{giveaway_code}</b>\n"
+            "Here's your post preview:"
+        )
+    except Exception:
+        logger.exception(
+            "Could not send creation confirmation to user %s",
+            tg_user.id,
+        )
+
+    # Sending the Telegram post is separate from database creation.
+    try:
+        await posts.send_post(bot, tg_user.id, gw)
+    except Exception:
+        logger.exception(
+            "Giveaway %s was created, but sending its preview failed",
+            giveaway_id,
+        )
+
+        await target.answer(
+            "⚠️ Your giveaway was created successfully, "
+            "but I couldn't send its post preview. "
+            "You can still manage it from the menu."
+        )
+
+    try:
         await target.answer(
             "What next?",
             reply_markup=Kb(
@@ -241,7 +295,7 @@ async def finish(
                             text="📣 Publish to a channel",
                             callback_data=GwCb(
                                 a="publish",
-                                id=gw.id,
+                                id=giveaway_id,
                             ).pack(),
                         )
                     ],
@@ -250,25 +304,25 @@ async def finish(
                             text="📊 Manage",
                             callback_data=GwCb(
                                 a="menu",
-                                id=gw.id,
+                                id=giveaway_id,
                             ).pack(),
                         )
                     ],
                 ]
             ),
         )
-
-        await audit.flush(bot)
-
     except Exception:
         logger.exception(
-            "Giveaway creation failed for Telegram user %s",
-            user_id,
+            "Could not send management buttons for giveaway %s",
+            giveaway_id,
         )
 
-        await target.answer(
-            "❌ Giveaway creation failed. Your setup data has been kept. "
-            "Please check the bot logs or contact the owner."
+    try:
+        await audit.flush(bot)
+    except Exception:
+        logger.exception(
+            "Audit queue flush failed after giveaway %s creation",
+            giveaway_id,
         )
 
 
@@ -337,11 +391,12 @@ async def on_skip(
         return
 
     await cb.answer()
+
     await advance(
         cb.message,
         state,
         bot,
-        cb.from_user.id,
+        cb.from_user,
         key,
     )
 
@@ -370,7 +425,7 @@ async def on_theme(
         cb.message,
         state,
         bot,
-        cb.from_user.id,
+        cb.from_user,
         "theme",
         theme,
     )
@@ -406,7 +461,7 @@ async def on_visibility(
         cb.message,
         state,
         bot,
-        cb.from_user.id,
+        cb.from_user,
         "public",
         is_public,
     )
@@ -428,7 +483,7 @@ async def on_input(
         return
 
     key = STEPS[data["step"]]
-    uid = message.from_user.id
+    tg_user = message.from_user
 
     if message.text and message.text.startswith("/"):
         await message.answer(
@@ -442,7 +497,7 @@ async def on_input(
                 message,
                 state,
                 bot,
-                uid,
+                tg_user,
                 "poster_file_id",
                 message.photo[-1].file_id,
             )
@@ -532,7 +587,7 @@ async def on_input(
         message,
         state,
         bot,
-        uid,
+        tg_user,
         key,
         value,
     )
