@@ -103,14 +103,14 @@ async def winners_text(s: AsyncSession, gw: Giveaway, ws: list[Winner]) -> str:
     if not ws:
         return (f"🏁 <b>{esc(gw.title)}</b> ({gw.code}) has ended.\n\n😕 No eligible participants this time.")
         users = {
-        u.tg_id: u
-        for u in (
-            await s.execute(
-                select(User).where(
-                    User.tg_id.in_([w.user_id for w in ws])
-                )
+    u.tg_id: u
+    for u in (
+        await s.execute(
+            select(User).where(
+                User.tg_id.in_([w.user_id for w in ws])
             )
-        ).scalars().all()
+        )
+    ).scalars().all()
         }
     lines = [f"🏁 <b>{esc(gw.title)}</b> ({gw.code}) has ended!", "", "🏆 <b>Winners</b>"]
     for w in ws:
