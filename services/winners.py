@@ -84,7 +84,11 @@ async def finalize(bot: Bot, redis: Redis, gid: int) -> list[int] | None:
                 s.add(Winner(giveaway_id=gid, user_id=uid, position=len(existing) + i + 1, selection_type="random"))
             everyone = [w.user_id for w in existing] + chosen
             if chosen:
-                await s.execute(update(User).where(User.id.in_(chosen)).values(wins_count=User.wins_count + 1))
+                await s.execute(
+    update(User)
+    .where(User.tg_id.in_(chosen))
+    .values(wins_count=User.wins_count + 1)
+            )
             gw.status, gw.ended_at = "completed", utcnow()
             await audit.record(s, "giveaway_completed", giveaway_id=gid, winners=len(everyone),
                                participants=await count_participants(s, gid), eligible=len(eligible))
